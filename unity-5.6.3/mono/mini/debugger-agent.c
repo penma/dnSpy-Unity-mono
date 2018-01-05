@@ -816,7 +816,7 @@ mono_debugger_agent_init (void)
 	mono_cond_init (&debugger_thread_exited_cond, NULL);
 
 	mono_profiler_install ((MonoProfiler*)&debugger_profiler, runtime_shutdown);
-	mono_profiler_set_events (MONO_PROFILE_APPDOMAIN_EVENTS | MONO_PROFILE_THREADS | MONO_PROFILE_ASSEMBLY_EVENTS | MONO_PROFILE_JIT_COMPILATION | MONO_PROFILE_METHOD_EVENTS);
+	mono_profiler_set_events (MONO_PROFILE_APPDOMAIN_EVENTS | MONO_PROFILE_THREADS | MONO_PROFILE_ASSEMBLY_EVENTS | MONO_PROFILE_JIT_COMPILATION | MONO_PROFILE_METHOD_EVENTS | MONO_PROFILE_ENTER_LEAVE);
 	mono_profiler_install_runtime_initialized (runtime_initialized);
 	mono_profiler_install_appdomain (NULL, appdomain_load, NULL, appdomain_unload);
 	mono_profiler_install_thread (thread_startup, thread_end);
@@ -824,9 +824,11 @@ mono_debugger_agent_init (void)
 	mono_profiler_install_jit_end (jit_end);
 	mono_profiler_install_method_invoke (start_runtime_invoke, end_runtime_invoke);
 
+	hackprof_init_after_agent();
 	dnSpy_debugger_init_after_agent ();
 
 	debugger_tls_id = TlsAlloc ();
+
 
 	thread_to_tls = mono_g_hash_table_new (NULL, NULL);
 	MONO_GC_REGISTER_ROOT (thread_to_tls);
@@ -3181,12 +3183,15 @@ thread_startup (MonoProfiler *prof, gsize tid)
 	tls->invoke_addr_stack = NULL;
 	TlsSetValue (debugger_tls_id, tls);
 
+	hackprof_init_new_thread(thread);
+
 	DEBUG (1, fprintf (log_file, "[%p] Thread started, obj=%p, tls=%p.\n", (gpointer)tid, thread, tls));
 
 	mono_loader_lock ();
 	mono_g_hash_table_insert (thread_to_tls, thread, tls);
 	mono_g_hash_table_insert (tid_to_thread, (gpointer)tid, thread);
 	mono_g_hash_table_insert (tid_to_thread_obj, (gpointer)tid, mono_thread_current ());
+	hackprof_init_new_thread_locked(thread);
 	mono_loader_unlock ();
 
 	process_profiler_event (EVENT_KIND_THREAD_START, thread);
