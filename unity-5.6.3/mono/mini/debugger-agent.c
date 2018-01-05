@@ -81,6 +81,7 @@ int WSAAPI getnameinfo(const struct sockaddr*,socklen_t,char*,DWORD,
 #include <mono/utils/mono-semaphore.h>
 #include "debugger-agent.h"
 #include "mini.h"
+#include "hackprof.h"
 
 #ifndef MONO_ARCH_SOFT_DEBUG_SUPPORTED
 #define DISABLE_DEBUGGER_AGENT 1
@@ -7405,6 +7406,28 @@ command_to_string (CommandSet command_set, int command)
 	}
 }
 
+static ErrorCode
+hackprof_commands(int command, guint8 *p, guint8 *end, Buffer *buf)
+{
+	int objid = decode_objid(p, &p, end);
+	int err;
+	MonoThread *thread;
+	err = get_object(objid, (MonoObject**)&thread);
+	if (err)
+		return err;
+
+	switch (command) {
+	case 42: {
+		hackprof_poke_thread(thread, 42);
+		break;
+	}
+	default:
+		return ERR_NOT_IMPLEMENTED;
+	}
+
+	return ERR_NONE;
+}
+
 static gboolean
 wait_for_attach (void)
 {
@@ -7553,6 +7576,9 @@ debugger_thread (void *arg)
 			break;
 		case CMD_SET_OBJECT_REF:
 			err = object_commands (command, p, end, &buf);
+			break;
+		case 0xcc: /* hackprof */
+			err = hackprof_commands(command, p, end, &buf);
 			break;
 		default:
 			err = ERR_NOT_IMPLEMENTED;

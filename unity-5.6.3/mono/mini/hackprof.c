@@ -17,7 +17,16 @@ static GHashTable *thread_to_tls;
 
 /* Hackprof thread-specific data (for all runtime threads)´*/
 typedef struct {
+	/* normally 0, set to something else when a command is available in command_buffer */
+	int command_pending;
+	/* a command that is to be executed, debugger thread puts it here */
+	int command_buffer;
+
+	/* Whether this thread is currently doing profile actions.
+	Only set by the thread itself in response to a command (so that it can perform cleanup work, close files etc.)
+	*/
 	int is_profiled;
+
 	FILE *profile_fh;
 	FILE *profile_bin_fh;
 	GHashTable *method_info;
@@ -31,6 +40,8 @@ static guint32 hackprof_tls_id;
  */
 void hackprof_init_new_thread(MonoThread *thread) {
 	HackprofTlsData *htls = g_new0(HackprofTlsData, 1);
+
+	htls->command_pending = 0;
 
 	/* FIXME: Allow threads to be profiled from start? Query somewhere else if profiling should happen */
 	htls->is_profiled = 1;
@@ -179,10 +190,41 @@ static int ensure_method_known(HackprofTlsData *htls, MonoMethod *method) {
 		}
 
 		g_hash_table_insert(htls->method_info, method, ty);
+
 		return ty;
 	}
 	
 	return value;
+}
+
+/*
+Obtain TLS data for current thread.
+Before returning, process pending command, if any, and checks if any profiling is supposed to take place.
+If yes, then TLS data is returned to caller, otherwise NULL (caller is supposed to check for this and return early)
+*/
+static HackprofTlsData *commands_and_htls_if_profiling() {
+	HackprofTlsData *htls = TlsGetValue(hackprof_tls_id);
+
+	if (htls->command_pending) {
+		/* "Process" command */
+		guint32 name_len;
+		gunichar2 *s = mono_thread_get_name(mono_thread_current(), &name_len);
+		char *name;
+		if (!s) {
+			name = g_malloc(sizeof(gchar));
+			name[0] = 0;
+		}
+		else {
+			name = g_utf16_to_utf8(s, name_len, NULL, NULL, NULL);
+			g_assert(name);
+		}
+		fprintf(htls->profile_fh, "*** Profiling command received: %d - I am \"%s\"\n", htls->command_buffer, name);
+		fflush(htls->profile_fh);
+		g_free(s);
+		htls->command_pending = 0;
+	}
+
+	return htls->is_profiled ? htls : NULL;
 }
 
 /* Do not trace the most basic types at all */
@@ -190,6 +232,9 @@ static int ensure_method_known(HackprofTlsData *htls, MonoMethod *method) {
 #define is_filtered_basic_type(ty) (!( ((ty) == MONO_TYPE_CLASS) || ((ty) == MONO_TYPE_GENERICINST) ))
 
 static void hackprof_enter(MonoProfiler *prof, MonoMethod *method) {
+	HackprofTlsData *htls = commands_and_htls_if_profiling();
+	if (!htls) return;
+
 	/* Quick-ignore some very heavy types */
 	MonoTypeEnum ty = method->klass->byval_arg.type;
 	if (is_filtered_basic_type(ty)) {
@@ -198,10 +243,6 @@ static void hackprof_enter(MonoProfiler *prof, MonoMethod *method) {
 
 	LARGE_INTEGER eventTime;
 	QueryPerformanceCounter(&eventTime);
-
-	HackprofTlsData *htls = TlsGetValue(hackprof_tls_id);
-	if (!htls) return;
-	if (!htls->is_profiled) return;
 
 	/* Now check on the extended ignore list & make sure it is known in the profile log */
 	int known_method = ensure_method_known(htls, method);
@@ -221,6 +262,9 @@ static void hackprof_enter(MonoProfiler *prof, MonoMethod *method) {
 
 
 static void hackprof_leave(MonoProfiler *prof, MonoMethod *method) { /* FIXME DEDUPLICATION */
+	HackprofTlsData *htls = commands_and_htls_if_profiling();
+	if (!htls) return;
+
 	/* Quick-ignore some very heavy types */
 	MonoTypeEnum ty = method->klass->byval_arg.type;
 	if (is_filtered_basic_type(ty)) {
@@ -229,10 +273,6 @@ static void hackprof_leave(MonoProfiler *prof, MonoMethod *method) { /* FIXME DE
 
 	LARGE_INTEGER eventTime;
 	QueryPerformanceCounter(&eventTime);
-
-	HackprofTlsData *htls = TlsGetValue(hackprof_tls_id);
-	if (!htls) return;
-	if (!htls->is_profiled) return;
 
 	/* Now check on the extended ignore list & make sure it is known in the profile log */
 	int known_method = ensure_method_known(htls, method);
@@ -252,7 +292,7 @@ static void hackprof_leave(MonoProfiler *prof, MonoMethod *method) { /* FIXME DE
 }
 
 /*
-Initialization code, run from the profiling agent thread.
+Initialization code, run once from the profiling agent thread.
 Set up global tables and install the profile functions in the runtime.
 */
 void hackprof_init_after_agent() {
@@ -261,4 +301,30 @@ void hackprof_init_after_agent() {
 	thread_to_tls = g_hash_table_new(mono_aligned_addr_hash, NULL);
 
 	mono_profiler_install_enter_leave(hackprof_enter, hackprof_leave);
+}
+
+/*
+Send a profile command to a mono thread.
+The command will actually get processed the next time any profileable event occurs
+(so when *any* method, even ignored one, is entered or left).
+*/
+void hackprof_poke_thread(MonoThread *thread, int command) {
+	HackprofTlsData *htls = g_hash_table_lookup(thread_to_tls, thread);
+	if (htls == NULL) {
+		/* Thread doesn't exist in our list ... */
+		// TODO: Some kind of error feedback
+		return;
+	}
+
+	/* FIXME: Multithreading hell */
+	if (htls->command_pending) {
+		/* Just dropping the command (FIXME) , no it doesn't work that way. */
+		/* Additionally, this *could* be changed in the meantime (although we,
+		 * the debugger thread, should be the only one to fiddle around here.
+		 * Everyone knows about these things that "should be ...". */
+		return;
+	}
+
+	htls->command_buffer = command;
+	htls->command_pending = 1;
 }
