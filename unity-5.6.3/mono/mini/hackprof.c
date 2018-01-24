@@ -44,7 +44,7 @@ void hackprof_init_new_thread(MonoThread *thread) {
 	htls->command_pending = 0;
 
 	/* FIXME: Allow threads to be profiled from start? Query somewhere else if profiling should happen */
-	htls->is_profiled = 1;
+	htls->is_profiled = 0;
 	htls->sbuf_usage = 0;
 
 	/* Open profile log file */
@@ -220,7 +220,9 @@ static HackprofTlsData *commands_and_htls_if_profiling() {
 		}
 		fprintf(htls->profile_fh, "*** Profiling command received: %d - I am \"%s\"\n", htls->command_buffer, name);
 		fflush(htls->profile_fh);
-		g_free(s);
+		// XXX just enable profiling here
+		htls->is_profiled = !htls->is_profiled; // cleanup?! XXX
+		g_free(name);
 		htls->command_pending = 0;
 	}
 
